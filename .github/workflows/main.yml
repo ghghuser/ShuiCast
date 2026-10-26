@@ -9,10 +9,13 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-
       - uses: microsoft/setup-msbuild@v2
+
       - name: Apply ShuiCast patches (Netladio, recording file name)
         run: python tools/shuicast_patch.py trunk
+
+      - name: Apply dim theme
+        run: python tools/shuicast_dim.py trunk
 
       - name: Patch sources for modern toolchain
         working-directory: trunk/shuicast
