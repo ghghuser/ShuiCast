@@ -1,0 +1,59 @@
+name: Build ShuiCast Standalone
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Patch sources for modern toolchain
+        working-directory: trunk/shuicast
+        shell: pwsh
+        run: |
+          # "Built on: "__DATE__ のスペース不足を直す (VS2015以降で必須)
+          $latin1 = [Text.Encoding]::GetEncoding(28591)
+          foreach ($f in Get-ChildItem -File -Filter *.cpp) {
+            $text = $latin1.GetString([IO.File]::ReadAllBytes($f.FullName))
+            $new = [regex]::Replace($text, '"(__DATE__|__TIME__)', '" ${1}')
+            if ($new -ne $text) {
+              [IO.File]::WriteAllBytes($f.FullName, $latin1.GetBytes($new))
+              Write-Host "patched $($f.Name)"
+            }
+          }
+
+      - name: Remove prebuilt exe (so a missing build cannot go unnoticed)
+        shell: pwsh
+        run: Remove-Item trunk/bin/shuicast.exe -ErrorAction SilentlyContinue
+
+      - name: Build shuicast_standalone (Win32 Release)
+        working-directory: trunk/shuicast
+        env:
+          CL: /DHAVE_STRUCT_TIMESPEC
+        run: >
+          msbuild shuicast_standalone.vcxproj
+          /p:Configuration=Release
+          /p:Platform=Win32
+          /p:PlatformToolset=v143
+          /p:WindowsTargetPlatformVersion=10.0
+          /m /v:minimal
+
+      - name: Bundle exe and DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          if (-not (Test-Path trunk/bin/shuicast.exe)) { throw 'shuicast.exe was not built' }
+          Copy-Item trunk/bin/shuicast.exe dist/
+          Get-ChildItem trunk/external/lib/*.dll | Where-Object { $_.BaseName -notmatch '_d$' } | Copy-Item -Destination dist/
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shuicast-standalone-bundle
+          path: dist/
+          if-no-files-found: error
