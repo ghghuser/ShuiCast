@@ -11,7 +11,10 @@ ShuiCast patches (applied at build time):
         headers are converted to that character set too, so they match what
         x-ladio-info announces.
 
- 2. Recording file name   "[YYYYMMDD] <Stream Name>_hhmmss.<ext>"
+ 2. Widens the clipped "Stream Name / Description / Genre" labels in YP Settings
+      (they show only "Stream" with the Segoe UI dialog font).
+
+ 3. Recording file name   "[YYYYMMDD] <Stream Name>_hhmmss.<ext>"
       (the old name was "<Stream Description>_<asctime>").
       Characters that are illegal in file names are removed in a multibyte-safe
       way, so Shift_JIS characters whose 2nd byte is 0x5C (表, 能, ...) survive.
@@ -79,6 +82,16 @@ def p_resource_h(t):
 
 # ----------------------------------------------------------------- shuicast.rc
 def p_rc(t):
+    # The stock labels are too narrow for the "Segoe UI" font and wrap, so only the
+    # first word ("Stream") is visible. Give them more room.
+    for text, y in (("Stream Name", 38), ("Stream Description", 59), ("Stream Genre", 101)):
+        t = edit(
+            t,
+            r'"%s",IDC_STATIC,\d+,%d,\d+,8' % (text, y),
+            '"%s",IDC_STATIC,10,%d,77,8' % (text, y),
+            "replace",
+            "shuicast.rc label " + text,
+        )
     return edit(
         t,
         r"    EDITTEXT\s+IDC_IRC,[^\n]*\n",
