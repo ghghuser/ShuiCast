@@ -18,7 +18,7 @@ import re
 import sys
 from pathlib import Path
 
-DIM_RGB = (218, 218, 218)
+DIM_RGB = (225, 225, 225)
 
 APP = Path(sys.argv[1] if len(sys.argv) > 1 else "trunk") / "shuicast"
 
