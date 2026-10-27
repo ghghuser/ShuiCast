@@ -13,6 +13,12 @@ ShuiCast stability fixes, applied at build time.
                    last try one status message is shown and it stops. Selecting the
                    device again (or any successful restart) re-arms it.
                    Standalone build only (SHUICASTSTANDALONE).
+  3. mono        - LAME (mp3) and Ogg Vorbis encoders set to Mono produced noise only /
+     encoders      slow, low, distorted sound, because they ignored that the encoder core
+                   always hands them interleaved stereo. Fixed in both branches.
+  4. joint       - the "Joint Stereo" label vanished when the mouse was moved over it
+     stereo        (the empty check box was wider than the box and sat on top of the
+     label     label). The check box is narrowed in shuicast.rc.
 
 (The password fix of the AltaCast patch is NOT needed: ShuiCast's URLize() encodes into
  a new buffer and never touches m_Password.)
@@ -91,8 +97,62 @@ def fix_fflush(t):
     return t
 
 
+# ------------------------------------------------------------ 3. mono encoders
+MARK_MONO = "shuicast_fixes: mono"
+
+
+def fix_mono(t):
+    """DoEncoding() ALWAYS receives interleaved stereo (for a mono encoder both
+    channels carry the same signal). The LAME and Ogg mono branches did not take that
+    into account: LAME wrote to a fixed index (-> noise only), Ogg consumed the
+    interleaved pairs as consecutive mono samples (-> half speed, low and distorted)."""
+    if MARK_MONO in t:
+        print("shuicast_fixes: mono fix already present, skipped")
+        return t
+    # LAME (lame_enc.dll): the output index was never advanced
+    t = sub_n(
+        t,
+        r"(if \( m_CurrentChannels == 1 \)[^\n]*\n\s*\{\n)(\s*)samplecount = numsamples;\n"
+        r"(\s*for \( int i = 0; i < numsamples \* 2; i \+= 2 \)\n\s*\{\n\s*)"
+        r"int_samples\[samplecount\] = \(short\)\(samples\[i\] \* 32767\.0\);\n",
+        lambda m: m.group(1) + m.group(2) + "samplecount = 0;\t/* " + MARK_MONO + " */\n"
+        + m.group(3) + "int_samples[samplecount++] = (short)(samples[i] * 32767.0);\n",
+        "libshuicast.cpp LAME mono branch",
+    )
+    # Ogg Vorbis: skip the duplicated right channel
+    t = sub_n(
+        t,
+        r"(if \( m_CurrentChannels == 1 \)\n\s*\{\n\s*while \( samplecounter < numsamples \)\n\s*\{\n)"
+        r"(\s*)buffer\[0\]\[samplecounter\] = \*\(src\+\+\);\n",
+        lambda m: m.group(1) + m.group(2) + "buffer[0][samplecounter] = *(src++);\n"
+        + m.group(2) + "src++;\t/* " + MARK_MONO + ": skip the duplicated channel */\n",
+        "libshuicast.cpp Ogg mono branch",
+    )
+    print("shuicast_fixes: mono fix added (LAME, Ogg)")
+    return t
+
+
+# ------------------------------------------------- 4. Joint Stereo label (rc)
+MARK_JS = "shuicast_fixes: joint stereo"
+
+
+def fix_jointstereo_rc(t):
+    """The empty check box (62 dialog units wide) lies on top of the 'Joint Stereo' label.
+    Whenever the mouse hovers over it, the check box repaints its whole area and erases the
+    label until the dialog is reopened. Make the check box as wide as the box itself."""
+    pat = r'(CONTROL\s+"",IDC_JOINTSTEREO,"Button",BS_AUTOCHECKBOX \| WS_TABSTOP,249,64,)62(,10)'
+    if not re.search(pat, t):
+        if re.search(r'IDC_JOINTSTEREO,"Button",BS_AUTOCHECKBOX \| WS_TABSTOP,249,64,12,10', t):
+            print("shuicast_fixes: joint stereo rc already patched, skipped")
+            return t
+        fail("shuicast.rc: IDC_JOINTSTEREO check box line not found")
+    t = sub_n(t, pat, r"\g<1>12\g<2>", "shuicast.rc IDC_JOINTSTEREO width")
+    print("shuicast_fixes: joint stereo check box narrowed (62 -> 12)")
+    return t
+
+
 # ---------------------------------------------------------------- 2. recording
-MARK_REC = "shuicast_fixes: recording device recovery"
+MARK_REC ="shuicast_fixes: recording device recovery"
 
 H_DECL = "    void RecoverRecording();\t// " + MARK_REC + "\n"
 
@@ -205,7 +265,8 @@ def fix_rec_cpp(t):
 if not CPP_DEF.isascii():
     fail("internal: inserted C++ must be ASCII")
 
-patch_file("libshuicast/libshuicast.cpp", fix_fflush)
+patch_file("libshuicast/libshuicast.cpp", lambda t: fix_mono(fix_fflush(t)))
+patch_file("shuicast/shuicast.rc", fix_jointstereo_rc)
 patch_file("shuicast/MainWindow.h", fix_rec_header)
 patch_file("shuicast/MainWindow.cpp", fix_rec_cpp)
 print("shuicast_fixes: done")
