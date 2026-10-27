@@ -29,6 +29,10 @@ ShuiCast stability fixes, applied at build time.
                     500 kbps). The AAC value no longer carries over to Ogg, and the initial
                     Ogg quality is 3 (oggenc's default, about 112 kbps) instead of 0.
                     Change OGG_DEFAULT_QUALITY in this script to use another value.
+  6. quality     - The dialog has ONE Quality field for AAC (10..500) and for Ogg Vorbis /
+     memory        MP3 / FLAC (0..10). Both values are remembered per encoder type: switching
+                   the type restores that type's own value (AAC 100, Ogg 3 at the start),
+                   and OK saves both.
 
 (The password fix of the AltaCast patch is NOT needed: ShuiCast's URLize() encodes into
  a new buffer and never touches m_Password.)
@@ -374,9 +378,139 @@ def fix_ogg_default(t):
     return t
 
 
+# ----------------------------------------- 6. Quality remembered per encoder type
+# The dialog has ONE Quality field for AAC (10..500) and for Ogg Vorbis / MP3 / FLAC (the
+# 0..10 "OggQuality"). Both values are kept in the dialog, switched together with the
+# encoder type, and both are saved with OK.
+MARK_QMEM = "shuicast_fixes: qmem"
+
+QMEM_VALID_AAC = "atoi( LPCSTR( %s ) ) > 0"
+QMEM_VALID_OGG = "!%(s)s.IsEmpty() && atof( LPCSTR( %(s)s ) ) >= 0 && atof( LPCSTR( %(s)s ) ) <= 10"
+
+
+def fix_qmem_header(t):
+    if MARK_QMEM in t:
+        print("shuicast_fixes: quality memory (header) already patched, skipped")
+        return t
+    return sub_n(
+        t,
+        r"([ \t]*CString[ \t]+m_Quality;\n)",
+        lambda m: m.group(1)
+        + "    CString   m_QualityAAC;   // " + MARK_QMEM + ": Quality of the AAC type\n"
+        + "    CString   m_QualityOgg;   // Quality of Ogg Vorbis / MP3 / FLAC (0..10)\n",
+        "BasicSettings.h m_Quality",
+    )
+
+
+QMEM_LOAD = (
+    "    // " + MARK_QMEM + ": both Quality values are known to the dialog\n"
+    "    basicSettings->m_QualityAAC = encoder->m_AACQuality;\n"
+    "    basicSettings->m_QualityOgg = encoder->m_OggQuality;\n"
+)
+
+QMEM_SAVE = """    // %(m)s: also store the Quality of the type that is not selected
+    if ( encoder->IsEncoderType( ENCODER_AAC ) )
+    {
+        if ( %(ogg)s ) strcpy( encoder->m_OggQuality, LPCSTR( basicSettings->m_QualityOgg ) );
+    }
+    if ( encoder->IsEncoderType( ENCODER_LAME ) || encoder->IsEncoderType( ENCODER_OGG ) || encoder->IsEncoderType( ENCODER_FLAC ) )
+    {
+        if ( %(aac)s ) strcpy( encoder->m_AACQuality, LPCSTR( basicSettings->m_QualityAAC ) );
+    }
+""" % {"m": MARK_QMEM,
+       "ogg": QMEM_VALID_OGG % {"s": "basicSettings->m_QualityOgg"},
+       "aac": QMEM_VALID_AAC % "basicSettings->m_QualityAAC"}
+
+
+def fix_qmem_config(t):
+    if MARK_QMEM in t:
+        print("shuicast_fixes: quality memory (Config.cpp) already patched, skipped")
+        return t
+    t = sub_n(
+        t,
+        r"([ \t]*m_CurrentEnc = encoder->encoderNumber;\n)(?=\s*basicSettings->SetStereoLabels\( SLAB_NONE \);)",
+        lambda m: m.group(1) + QMEM_LOAD,
+        "Config.cpp m_CurrentEnc",
+    )
+    t = sub_n(
+        t,
+        r"([ \t]*if \( encoder->IsEncoderType\( ENCODER_OGG  \) \) strcpy\( encoder->m_OggQuality, LPCSTR\( basicSettings->m_Quality \) \);\n)",
+        lambda m: m.group(1) + QMEM_SAVE,
+        "Config.cpp m_OggQuality save",
+    )
+    return t
+
+
+QMEM_DIALOG = """m_QualityCtrl.EnableWindow(TRUE);
+    // %(m)s: remember the Quality per encoder type. AAC has its own value,
+    // Ogg Vorbis / MP3 / FLAC share the Ogg one (0..10).
+    {
+        CString leavingQuality;
+
+        m_QualityCtrl.GetWindowText(leavingQuality);
+        if (m_EncoderType == "AAC")
+        {
+            m_QualityAAC = leavingQuality;
+        }
+        else if (m_EncoderType == "OggVorbis" || m_EncoderType == "MP3 Lame" || m_EncoderType == "Ogg FLAC")
+        {
+            m_QualityOgg = leavingQuality;
+        }
+    }
+    m_EncoderType = selectedString;
+    {
+        CString enteringQuality;
+        bool    setQuality = false;
+
+        if (m_EncoderType == "AAC")
+        {
+            enteringQuality = (%(aac)s) ? m_QualityAAC : CString(_T("%(aacdef)s"));
+            setQuality = true;
+        }
+        else if (m_EncoderType == "OggVorbis" || m_EncoderType == "MP3 Lame" || m_EncoderType == "Ogg FLAC")
+        {
+            enteringQuality = (%(ogg)s) ? m_QualityOgg : CString(_T("%(oggdef)s"));
+            setQuality = true;
+        }
+        if (setQuality && m_QualityCtrl.GetSafeHwnd())
+        {
+            m_QualityCtrl.SetWindowText(enteringQuality);
+            m_Quality = enteringQuality;
+        }
+    }
+    """
+
+
+def fix_qmem_dialog(t):
+    if MARK_QMEM in t:
+        print("shuicast_fixes: quality memory (dialog) already patched, skipped")
+        return t
+    block = QMEM_DIALOG % {
+        "m": MARK_QMEM,
+        "aac": QMEM_VALID_AAC % "m_QualityAAC",
+        "aacdef": "100",
+        "ogg": QMEM_VALID_OGG % {"s": "m_QualityOgg"},
+        "oggdef": OGG_DEFAULT_QUALITY,
+    }
+    t = sub_n(
+        t,
+        r"m_QualityCtrl\.EnableWindow\(TRUE\);\n\s*m_EncoderType = selectedString;\n\s*",
+        lambda m: block,
+        "BasicSettings.cpp OnSelendokEncoderType",
+    )
+    print("shuicast_fixes: Quality remembered per encoder type")
+    return t
+
+
+for _name, _blk in (("QMEM_LOAD", QMEM_LOAD), ("QMEM_SAVE", QMEM_SAVE), ("QMEM_DIALOG", QMEM_DIALOG)):
+    if not _blk.isascii():
+        fail("internal: inserted C++ (%s) must be ASCII" % _name)
+
+patch_file("shuicast/Config.cpp", fix_qmem_config)
+patch_file("shuicast/BasicSettings.h", fix_qmem_header)
+patch_file("shuicast/BasicSettings.cpp", lambda t: fix_qmem_dialog(fix_ogg_ui(fix_aac_ui(t))))
 patch_file("libshuicast/libshuicast.cpp",
            lambda t: fix_ogg_default(fix_aac_quality(fix_mono(fix_fflush(t)))))
-patch_file("shuicast/BasicSettings.cpp", lambda t: fix_ogg_ui(fix_aac_ui(t)))
 patch_file("shuicast/shuicast.rc", fix_jointstereo_rc)
 patch_file("shuicast/MainWindow.h", fix_rec_header)
 patch_file("shuicast/MainWindow.cpp", fix_rec_cpp)
