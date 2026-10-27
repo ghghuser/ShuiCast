@@ -19,6 +19,12 @@ ShuiCast stability fixes, applied at build time.
   4. joint       - the "Joint Stereo" label vanished when the mouse was moved over it
      stereo        (the empty check box was wider than the box and sat on top of the
      label     label). The check box is narrowed in shuicast.rc.
+  5. AAC         - * AAC Quality 0 / empty (what the field holds after switching the
+     settings       encoder type to AAC) gave a very distorted 24 kbps stream. It is now
+                    100 in the dialog and, as a safety net, in the encoder.
+                  * "Use bitrate" (Ogg Vorbis only) stayed ticked after switching to AAC
+                    and then disabled Quality and enabled the unused Bitrate field. For
+                    AAC only Quality is editable now.
 
 (The password fix of the AltaCast patch is NOT needed: ShuiCast's URLize() encodes into
  a new buffer and never touches m_Password.)
@@ -265,7 +271,57 @@ def fix_rec_cpp(t):
 if not CPP_DEF.isascii():
     fail("internal: inserted C++ must be ASCII")
 
-patch_file("libshuicast/libshuicast.cpp", lambda t: fix_mono(fix_fflush(t)))
+# ----------------------------------------------------------- 5. AAC settings
+MARK_AAC = "shuicast_fixes: aac"
+
+AAC_UI_NEW = """m_BitrateCtrl.EnableWindow( FALSE );\t/* %(m)s: faac is quality based, the bitrate and
+        "Use bitrate" (Ogg only) are ignored - only Quality is editable */
+        m_QualityCtrl.EnableWindow( TRUE );
+        if ( m_QualityCtrl.GetSafeHwnd() )
+        {
+            CString aacQuality;
+            m_QualityCtrl.GetWindowText( aacQuality );
+            if ( atoi( LPCSTR( aacQuality ) ) <= 0 )  // empty/0 after switching from another type
+            {
+                m_QualityCtrl.SetWindowText( _T( "100" ) );
+                m_Quality = _T( "100" );
+            }
+        }
+""" % {"m": MARK_AAC}
+
+
+def fix_aac_ui(t):
+    if MARK_AAC in t:
+        print("shuicast_fixes: AAC settings (UI) already patched, skipped")
+        return t
+    t = sub_n(
+        t,
+        r'(else if \(m_EncoderType == "AAC"\)\n\s*\{\n\s*)'
+        r"m_BitrateCtrl\.EnableWindow\(\s*m_UseBitrate \);\n\s*m_QualityCtrl\.EnableWindow\(\s*!m_UseBitrate \);\n",
+        lambda m: m.group(1) + AAC_UI_NEW,
+        "BasicSettings.cpp AAC branch of UpdateFields",
+    )
+    print("shuicast_fixes: AAC settings (UI) fixed: Quality only, empty/0 -> 100")
+    return t
+
+
+def fix_aac_quality(t):
+    if MARK_AAC in t:
+        print("shuicast_fixes: AAC quality default already patched, skipped")
+        return t
+    t = sub_n(
+        t,
+        r"([ \t]*)m_pConfig->quantqual = atoi\( m_AACQuality \);\n",
+        lambda m: m.group(1) + "m_pConfig->quantqual = ( atoi( m_AACQuality ) > 0 ) ? atoi( m_AACQuality ) : 100;\t/* "
+        + MARK_AAC + ": 0/empty -> 100 */\n",
+        "libshuicast.cpp quantqual",
+    )
+    print("shuicast_fixes: AAC quality 0/empty -> 100 in the encoder")
+    return t
+
+
+patch_file("libshuicast/libshuicast.cpp", lambda t: fix_aac_quality(fix_mono(fix_fflush(t))))
+patch_file("shuicast/BasicSettings.cpp", fix_aac_ui)
 patch_file("shuicast/shuicast.rc", fix_jointstereo_rc)
 patch_file("shuicast/MainWindow.h", fix_rec_header)
 patch_file("shuicast/MainWindow.cpp", fix_rec_cpp)
