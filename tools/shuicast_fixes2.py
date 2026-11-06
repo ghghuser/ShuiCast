@@ -666,10 +666,18 @@ def fix_lc_label(t):
     )
 
 
+# ------------------------------- 8. "Parametric Stereo" label overlapped the checkbox
+def fix_para_label(t):
+    if "IDC_PARASTEREOLABEL" not in t:
+        fail("rc: IDC_PARASTEREOLABEL not found")
+    # the label started 1 dialog unit inside the checkbox (which ends at x=261) and lost part of the "P"
+    return re.sub(r"(IDC_PARASTEREOLABEL,)260(,64,60,10)", r"\g<1>261\g<2>", t)
+
+
 patch_file("shuicast/Config.cpp", lambda t: fix_avail_config(fix_lock_config(t)))
 patch_file("shuicast/BasicSettings.h", lambda t: fix_high_header(fix_avail_header(fix_lock_header(t))))
 patch_file("shuicast/BasicSettings.cpp", lambda t: fix_high_cpp(fix_dropdown_width(fix_selendok_refresh(fix_avail_cpp(fix_lock_cpp(t))))))
 patch_file("shuicast/shuicast_standalone.cpp", fix_instance)
 patch_file("libshuicast/libshuicast.cpp", lambda t: fix_lc_label(fix_loaddll(fix_aacp(t))))
-patch_file("shuicast/shuicast.rc", fix_unsorted_rc)
+patch_file("shuicast/shuicast.rc", lambda t: fix_para_label(fix_unsorted_rc(t)))
 print(TAG + ": done")
