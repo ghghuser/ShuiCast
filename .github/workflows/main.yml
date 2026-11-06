@@ -19,6 +19,9 @@ jobs:
         
       - name: Apply stability fixes (fflush, recording recovery)
         run: python tools/shuicast_fixes.py trunk
+
+      - name: Apply fixes 2 (encoder lock, multi-instance warning, HE-AAC High / LC-AAC)
+        run: python tools/shuicast_fixes2.py trunk
         
       - name: Patch sources for modern toolchain
         working-directory: trunk/shuicast
