@@ -236,9 +236,319 @@ def fix_aacp(t):
     return t
 
 
-patch_file("shuicast/Config.cpp", fix_lock_config)
-patch_file("shuicast/BasicSettings.h", fix_lock_header)
-patch_file("shuicast/BasicSettings.cpp", fix_lock_cpp)
+# ------------------------------------------- 5. unavailable encoders stay in the list
+MARK_AVAIL = TAG + ": avail"
+
+AVAIL_CODE = r'''/* @@M@@: encoder types whose DLL cannot be loaded stay in the list and are marked "(DLL...)".
+ * Selecting one shows the reason (missing / not 32bit / missing dependency). */
+#define ENC_NA_SUFFIX " (DLL\x82\xc8\x82\xb5)"
+#define ENC_ALL_PLUGINS 1
+
+static BOOL EncFileExists(const CString &path)
+{
+	return GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static DWORD EncRvaToOffset(IMAGE_NT_HEADERS32 *nt, DWORD rva)
+{
+	IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+	WORD i;
+
+	for (i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+		DWORD size = sec[i].Misc.VirtualSize;
+		if (sec[i].SizeOfRawData > size) size = sec[i].SizeOfRawData;
+		if (rva >= sec[i].VirtualAddress && rva < sec[i].VirtualAddress + size) {
+			return rva - sec[i].VirtualAddress + sec[i].PointerToRawData;
+		}
+	}
+	return 0;
+}
+
+/* names of the DLLs that the given (32bit) DLL imports directly but that cannot be found */
+static CString EncFindMissingImports(const CString &dllPath)
+{
+	CString missing;
+	CString dllDir = dllPath;
+	int slash = dllDir.ReverseFind('\\');
+	HANDLE hf;
+	DWORD size;
+	DWORD got = 0;
+	BYTE *buf = NULL;
+
+	if (slash >= 0) dllDir = dllDir.Left(slash + 1);
+	else dllDir = "";
+
+	hf = CreateFile(dllPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hf == INVALID_HANDLE_VALUE) return missing;
+	size = GetFileSize(hf, NULL);
+	if (size != INVALID_FILE_SIZE && size > 1024 && size < 64 * 1024 * 1024) {
+		buf = (BYTE *) malloc(size);
+	}
+	if (buf != NULL && ReadFile(hf, buf, size, &got, NULL) && got == size) {
+		IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *) buf;
+		if (dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0 &&
+			(DWORD) dos->e_lfanew + sizeof(IMAGE_NT_HEADERS32) < size) {
+			IMAGE_NT_HEADERS32 *nt = (IMAGE_NT_HEADERS32 *) (buf + dos->e_lfanew);
+			if (nt->Signature == IMAGE_NT_SIGNATURE && nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+				DWORD impRva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+				DWORD impOff = (impRva != 0) ? EncRvaToOffset(nt, impRva) : 0;
+				int guard = 0;
+				while (impOff != 0 && impOff + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= size && guard++ < 512) {
+					IMAGE_IMPORT_DESCRIPTOR *d = (IMAGE_IMPORT_DESCRIPTOR *) (buf + impOff);
+					DWORD nameOff;
+					if (d->Name == 0) break;
+					nameOff = EncRvaToOffset(nt, d->Name);
+					if (nameOff != 0 && nameOff < size) {
+						const char *name = (const char *) (buf + nameOff);
+						DWORD len = 0;
+						while (nameOff + len < size && name[len] != 0 && len < 260) len++;
+						if (nameOff + len < size && name[len] == 0 && len > 0 &&
+							_strnicmp(name, "api-ms-", 7) != 0 && _strnicmp(name, "ext-ms-", 7) != 0) {
+							char found[MAX_PATH];
+							char *filePart = NULL;
+							CString own = dllDir + name;
+							if (SearchPathA(NULL, name, NULL, MAX_PATH, found, &filePart) == 0 && !EncFileExists(own)) {
+								if (!missing.IsEmpty()) missing += ", ";
+								missing += name;
+							}
+						}
+					}
+					impOff += sizeof(IMAGE_IMPORT_DESCRIPTOR);
+				}
+			}
+		}
+	}
+	if (buf != NULL) free(buf);
+	CloseHandle(hf);
+	return missing;
+}
+
+/* Two passes: pass 0 adds the usable encoders, pass 1 adds the unusable ones below them. */
+void CBasicSettings::AddEncoderItem(const char *label, const char *dll, BOOL plugins, BOOL unavailablePass)
+{
+	HINSTANCE h = LoadLibrary(dll);
+
+	if (h == NULL && plugins) {
+		CString p;
+		p.Format("plugins\\%s", dll);
+		h = LoadLibrary(p);
+	}
+	if (h != NULL) {
+		FreeLibrary(h);
+		if (!unavailablePass) m_EncoderTypeCtrl.AddString(label);
+	}
+	else if (unavailablePass) {
+		CString s = label;
+		s += ENC_NA_SUFFIX;
+		m_EncoderTypeCtrl.AddString(s);
+	}
+}
+
+/* select by exact name (also the "(DLL...)" variant); SelectString would match prefixes ("AAC" / "AAC Plus") */
+void CBasicSettings::SelectEncoderItem(const CString &name)
+{
+	int idx = m_EncoderTypeCtrl.FindStringExact(-1, name);
+
+	if (idx == CB_ERR) {
+		CString s = name;
+		s += ENC_NA_SUFFIX;
+		idx = m_EncoderTypeCtrl.FindStringExact(-1, s);
+	}
+	if (idx != CB_ERR) m_EncoderTypeCtrl.SetCurSel(idx);
+}
+
+void CBasicSettings::ShowEncoderUnavailable(const CString &selected)
+{
+	CString type = selected;
+	int cut = type.Find(" (");
+	const char *dll = "";
+	BOOL plugins = (ENC_ALL_PLUGINS != 0);
+	char exe[MAX_PATH] = "";
+	char cwd[MAX_PATH] = "";
+	CString exeDir;
+	CString cwdDir;
+	CString cand[4];
+	CString found;
+	int n = 0;
+	int i;
+	int sl;
+	wchar_t msg[2048];
+	wchar_t body[1900];
+
+	if (cut > 0) type = type.Left(cut);
+	if (type == "MP3 Lame") dll = "lame_enc.dll";
+	else if (type == "AAC") dll = "libfaac.dll";
+	else if (type == "AAC Plus" || type == "HE-AAC" || type == "HE-AAC High" || type == "LC-AAC") {
+		dll = "enc_aacplus.dll";
+		plugins = TRUE;
+	}
+	else if (type.Left(6) == "FHGAAC") {
+		dll = "enc_fhgaac.dll";
+		plugins = TRUE;
+	}
+	if (dll[0] == 0) return;
+
+	GetModuleFileNameA(NULL, exe, MAX_PATH);
+	exeDir = exe;
+	sl = exeDir.ReverseFind('\\');
+	if (sl >= 0) exeDir = exeDir.Left(sl + 1);
+	else exeDir = "";
+	GetCurrentDirectoryA(MAX_PATH, cwd);
+	cwdDir = cwd;
+	if (!cwdDir.IsEmpty() && cwdDir.Right(1) != "\\") cwdDir += "\\";
+
+	cand[n++] = exeDir + dll;
+	if (plugins) cand[n++] = exeDir + "plugins\\" + dll;
+	cand[n++] = cwdDir + dll;
+	if (plugins) cand[n++] = cwdDir + "plugins\\" + dll;
+	for (i = 0; i < n; i++) {
+		if (EncFileExists(cand[i])) {
+			found = cand[i];
+			break;
+		}
+	}
+
+	if (found.IsEmpty()) {
+		_snwprintf(body, 1899, L"\u7406\u7531: %S \u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093\u3002\n\n\u5b9f\u884c\u30d5\u30a1\u30a4\u30eb(exe)\u3068\u540c\u3058\u30d5\u30a9\u30eb\u30c0%s\u306b\u7f6e\u3044\u3066\u304f\u3060\u3055\u3044\u3002", dll, plugins ? L"\u3001\u307e\u305f\u306f plugins \u30d5\u30a9\u30eb\u30c0" : L"");
+	}
+	else {
+		HMODULE h = LoadLibraryExA(found, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+		if (h != NULL) {
+			FreeLibrary(h);
+			_snwprintf(body, 1899, L"%S \u306f\u8aad\u307f\u8fbc\u3081\u307e\u3057\u305f\u3002\u8a2d\u5b9a\u753b\u9762\u3092\u958b\u304d\u76f4\u3059\u3068\u9078\u3079\u308b\u3088\u3046\u306b\u306a\u308a\u307e\u3059\u3002", dll);
+		}
+		else {
+			DWORD err = GetLastError();
+			if (err == ERROR_BAD_EXE_FORMAT) {
+				_snwprintf(body, 1899, L"\u7406\u7531: %S \u306f\u898b\u3064\u304b\u308a\u307e\u3057\u305f\u304c\u300132bit\u7248\u3067\u306f\u306a\u3044\u305f\u3081\u8aad\u307f\u8fbc\u3081\u307e\u305b\u3093(\u30a8\u30e9\u30fc193)\u3002\n\n\u3053\u306e\u30a2\u30d7\u30ea\u306f32bit\u7248\u306a\u306e\u3067\u300132bit\u7248\u306e %S \u304c\u5fc5\u8981\u3067\u3059\u3002\n\n\u5834\u6240: %S", dll, dll, (LPCSTR) found);
+			}
+			else if (err == ERROR_MOD_NOT_FOUND) {
+				CString missing = EncFindMissingImports(found);
+				if (missing.IsEmpty()) {
+					_snwprintf(body, 1899, L"\u7406\u7531: %S \u306f\u898b\u3064\u304b\u308a\u307e\u3057\u305f\u304c\u3001\u8aad\u307f\u8fbc\u3081\u307e\u305b\u3093(\u30a8\u30e9\u30fc126)\u3002\n\n\u3053\u306eDLL\u304c\u5fc5\u8981\u3068\u3059\u308b\u5225\u306eDLL\u304c\u8db3\u308a\u306a\u3044\u53ef\u80fd\u6027\u304c\u3042\u308a\u307e\u3059\u3002\n\n\u8db3\u308a\u306a\u3044DLL: %s\n\n\u5834\u6240: %S", dll, L"(\u7279\u5b9a\u3067\u304d\u307e\u305b\u3093\u3067\u3057\u305f\u3002VC\u30e9\u30f3\u30bf\u30a4\u30e0\u306a\u3069\u304c\u8db3\u308a\u306a\u3044\u5834\u5408\u304c\u3042\u308a\u307e\u3059)", (LPCSTR) found);
+				}
+				else {
+					_snwprintf(body, 1899, L"\u7406\u7531: %S \u306f\u898b\u3064\u304b\u308a\u307e\u3057\u305f\u304c\u3001\u8aad\u307f\u8fbc\u3081\u307e\u305b\u3093(\u30a8\u30e9\u30fc126)\u3002\n\n\u3053\u306eDLL\u304c\u5fc5\u8981\u3068\u3059\u308b\u5225\u306eDLL\u304c\u8db3\u308a\u306a\u3044\u53ef\u80fd\u6027\u304c\u3042\u308a\u307e\u3059\u3002\n\n\u8db3\u308a\u306a\u3044DLL: %s\n\n\u5834\u6240: %S", dll, (LPCWSTR) CStringW((LPCSTR) missing), (LPCSTR) found);
+				}
+			}
+			else {
+				_snwprintf(body, 1899, L"\u7406\u7531: %S \u306e\u8aad\u307f\u8fbc\u307f\u306b\u5931\u6557\u3057\u307e\u3057\u305f(\u30a8\u30e9\u30fc%lu)\u3002\n\n\u5834\u6240: %S", dll, (unsigned long) err, (LPCSTR) found);
+			}
+		}
+	}
+	body[1899] = 0;
+	_snwprintf(msg, 2047, L"\u300c%S\u300d\u306f\u4f7f\u3048\u307e\u305b\u3093\u3002\n\n%s", (LPCSTR) type, body);
+	msg[2047] = 0;
+	MessageBoxW(m_hWnd, msg, L"\u30a8\u30f3\u30b3\u30fc\u30c0\u30fc\u3092\u9078\u3079\u307e\u305b\u3093", MB_OK | MB_ICONINFORMATION);
+}
+
+'''
+
+INIT_PAT = r"#if HAVE_LAME\b.*?(?=\s*return TRUE;)"
+INIT_REPL = '{\n\tint encPass;\n\tfor (encPass = 0; encPass < 2; encPass++) {\n#if HAVE_LAME\n\t\tAddEncoderItem("MP3 Lame", "lame_enc.dll", TRUE, encPass != 0);   // @@M@@\n#endif\n#if HAVE_FAAC\n\t\tAddEncoderItem("AAC", "libfaac.dll", TRUE, encPass != 0);\n#endif\n#if HAVE_AACP\n\t\tAddEncoderItem("HE-AAC", "enc_aacplus.dll", TRUE, encPass != 0);\n\t\tAddEncoderItem("HE-AAC High", "enc_aacplus.dll", TRUE, encPass != 0);\n\t\tAddEncoderItem("LC-AAC", "enc_aacplus.dll", TRUE, encPass != 0);\n#endif\n#if HAVE_FHGAACP\n\t\tAddEncoderItem("FHGAAC-AUTO", "enc_fhgaac.dll", TRUE, encPass != 0);\n\t\tAddEncoderItem("FHGAAC-LC", "enc_fhgaac.dll", TRUE, encPass != 0);\n\t\tAddEncoderItem("FHGAAC-HE", "enc_fhgaac.dll", TRUE, encPass != 0);\n\t\tAddEncoderItem("FHGAAC-HEv2", "enc_fhgaac.dll", TRUE, encPass != 0);\n#endif\n\t}\n}'
+C_OPEN = "//"
+C_CLOSE = ""
+
+
+def fix_avail_header(t):
+    if MARK_AVAIL in t:
+        return t
+    return sub_once(
+        t,
+        r"([ \t]*)void UpdateFields\s*\(\);\n",
+        lambda m: m.group(0)
+        + m.group(1) + "void AddEncoderItem(const char *label, const char *dll, BOOL plugins, BOOL unavailablePass);   " + C_OPEN + " " + MARK_AVAIL + " " + C_CLOSE + "\n"
+        + m.group(1) + "void SelectEncoderItem(const CString &name);\n"
+        + m.group(1) + "void ShowEncoderUnavailable(const CString &selected);\n",
+        "BasicSettings.h avail declarations",
+    )
+
+
+def fix_avail_cpp(t):
+    if MARK_AVAIL in t:
+        return t
+    # 1. helper code before OnInitDialog
+    t = sub_once(
+        t,
+        r"BOOL CBasicSettings::OnInitDialog\s*\(\)",
+        lambda m: AVAIL_CODE.replace("@@M@@", MARK_AVAIL) + m.group(0),
+        "BasicSettings.cpp OnInitDialog (helpers)",
+    )
+    # 2. the list is built without DLL checks
+    t = sub_once(t, INIT_PAT, lambda m: INIT_REPL.replace("@@M@@", MARK_AVAIL), "BasicSettings.cpp encoder list", flags=re.S)
+    # 3. selecting an unavailable type: explain and go back
+    t = sub_once(
+        t,
+        r"(void CBasicSettings::OnSelendokEncoderType\s*\(\)\s*\{\n)",
+        lambda m: m.group(1)
+        + "\t" + C_OPEN + " " + MARK_AVAIL + " " + C_CLOSE + "\n"
+        + "\t{\n"
+        + "\t\tCString selStr;\n"
+        + "\t\tint selIdx = m_EncoderTypeCtrl.GetCurSel();\n"
+        + "\t\tif (selIdx >= 0) {\n"
+        + "\t\t\tm_EncoderTypeCtrl.GetLBText(selIdx, selStr);\n"
+        + "\t\t\tif (selStr.Find(\" (\") > 0) {\n"
+        + "\t\t\t\tShowEncoderUnavailable(selStr);\n"
+        + "\t\t\t\tSelectEncoderItem(m_EncoderType);\n"
+        + "\t\t\t\treturn;\n"
+        + "\t\t\t}\n"
+        + "\t\t}\n"
+        + "\t}\n",
+        "BasicSettings.cpp OnSelendokEncoderType",
+    )
+    # 4. the "(DLL...)" mark never reaches the settings
+    t = sub_once(
+        t,
+        r"([ \t]*)//\}\}AFX_DATA_MAP\n",
+        lambda m: m.group(0)
+        + m.group(1) + "if (pDX->m_bSaveAndValidate) {\t" + C_OPEN + " " + MARK_AVAIL + ": drop the (DLL..) mark " + C_CLOSE + "\n"
+        + m.group(1) + "\tint markPos = m_EncoderType.Find(\" (\");\n"
+        + m.group(1) + "\tif (markPos > 0) m_EncoderType = m_EncoderType.Left(markPos);\n"
+        + m.group(1) + "}\n",
+        "BasicSettings.cpp DoDataExchange",
+    )
+    return t
+
+
+
+def fix_avail_config(t):
+    if "SelectEncoderItem" in t:
+        return t
+    return sub_once(
+        t,
+        r"basicSettings->m_EncoderTypeCtrl\.SelectString\(\s*0,\s*basicSettings->m_EncoderType\s*\);",
+        "basicSettings->SelectEncoderItem( basicSettings->m_EncoderType );   " + C_OPEN + " " + MARK_AVAIL + " " + C_CLOSE,
+        "Config.cpp encoder selection",
+    )
+
+# ------------------------------- 4. crash on reconnect: encoder object outlives its DLL
+MARK_DLL = TAG + ": loaddll"
+
+
+def fix_loaddll(t):
+    if MARK_DLL in t:
+        return t
+    return sub_once(
+        t,
+        r"(void CEncoder::LoadDLL \( const char_t \*name, const char_t \*msg \)\s*\{\n)([ \t]*)if \( m_hDLL \) ::FreeLibrary\( m_hDLL \);",
+        lambda m: m.group(1)
+        + "#if HAVE_AACP\n"
+        + m.group(2) + "// %s: the AAC+ encoder object lives in the DLL that is unloaded below;\n" % MARK_DLL
+        + m.group(2) + "// deleting it after the unload (next connect) crashed, so delete it first\n"
+        + m.group(2) + "if ( m_AACPEncoder )\n"
+        + m.group(2) + "{\n"
+        + m.group(2) + "    delete m_AACPEncoder;\n"
+        + m.group(2) + "    m_AACPEncoder = NULL;\n"
+        + m.group(2) + "}\n"
+        + "#endif\n"
+        + m.group(2) + "if ( m_hDLL ) ::FreeLibrary( m_hDLL );",
+        "libshuicast.cpp LoadDLL",
+    )
+
+
+patch_file("shuicast/Config.cpp", lambda t: fix_avail_config(fix_lock_config(t)))
+patch_file("shuicast/BasicSettings.h", lambda t: fix_avail_header(fix_lock_header(t)))
+patch_file("shuicast/BasicSettings.cpp", lambda t: fix_avail_cpp(fix_lock_cpp(t)))
 patch_file("shuicast/shuicast_standalone.cpp", fix_instance)
-patch_file("libshuicast/libshuicast.cpp", fix_aacp)
+patch_file("libshuicast/libshuicast.cpp", lambda t: fix_loaddll(fix_aacp(t)))
 print(TAG + ": done")
