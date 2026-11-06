@@ -603,10 +603,73 @@ def fix_selendok_refresh(t):
     )
 
 
+# ---------------------------------- 7. HE-AAC High is stereo only; LC-AAC label
+MARK_HIGH = TAG + ": high"
+
+
+def fix_high_header(t):
+    if MARK_HIGH in t:
+        return t
+    return sub_once(
+        t,
+        r"([ \t]*)void SelectEncoderItem\(const CString &name\);\n",
+        lambda m: m.group(0)
+        + m.group(1) + "CString m_SavedChannels;   // %s: channels value kept while HE-AAC High forces stereo\n" % MARK_HIGH,
+        "BasicSettings.h SelectEncoderItem declaration",
+    )
+
+
+def fix_high_cpp(t):
+    if MARK_HIGH in t:
+        return t
+    # HE-AAC High: the encoder always produces stereo -> show 2 and grey the field
+    t = sub_once(
+        t,
+        r'if\(br < 96 && ch == 2\)\s*\{\s*m_Channels = "1";\s*ch = 1;\s*m_ChannelsCtrl\.EnableWindow\(FALSE\);\s*\}\s*else if\(br > 160 && ch == 1\)\s*\{\s*m_Channels = "2";\s*ch = 2;\s*m_ChannelsCtrl\.EnableWindow\(FALSE\);\s*\}',
+        lambda m: (
+            '// %s: the HE-AAC High encoder always produces stereo\n' % MARK_HIGH
+            + '\t\tm_Channels = "2";\n'
+            + '\t\tch = 2;\n'
+            + '\t\tm_ChannelsCtrl.EnableWindow(FALSE);'
+        ),
+        "BasicSettings.cpp HE-AAC High channels",
+    )
+    # remember the user's channels value while High is selected
+    t = sub_once(
+        t,
+        r"([ \t]*)m_EncoderType = selectedString;\n",
+        lambda m: (
+            m.group(1) + "// %s: keep the user's Channels value while HE-AAC High forces 2\n" % MARK_HIGH
+            + m.group(1) + 'if ( m_EncoderType == "HE-AAC High" && selectedString != "HE-AAC High" )\n'
+            + m.group(1) + "{\n"
+            + m.group(1) + "    if ( !m_SavedChannels.IsEmpty() ) m_Channels = m_SavedChannels;\n"
+            + m.group(1) + "}\n"
+            + m.group(1) + 'else if ( m_EncoderType != "HE-AAC High" && selectedString == "HE-AAC High" )\n'
+            + m.group(1) + "{\n"
+            + m.group(1) + "    m_SavedChannels = m_Channels;\n"
+            + m.group(1) + "}\n"
+        ) + m.group(0),
+        "BasicSettings.cpp remember channels",
+    )
+    return t
+
+
+def fix_lc_label(t):
+    mark = TAG + ": lclabel"
+    if mark in t:
+        return t
+    return sub_once(
+        t,
+        r'(strcpy\(enc, "LC-AAC\(ct\)"\);\n[ \t]*)strcpy\(mode, "Stereo"\);',
+        lambda m: m.group(1) + 'strcpy(mode, (m_CurrentChannels == 2) ? "Stereo" : "Mono");   // %s' % mark,
+        "libshuicast.cpp LC-AAC label",
+    )
+
+
 patch_file("shuicast/Config.cpp", lambda t: fix_avail_config(fix_lock_config(t)))
-patch_file("shuicast/BasicSettings.h", lambda t: fix_avail_header(fix_lock_header(t)))
-patch_file("shuicast/BasicSettings.cpp", lambda t: fix_dropdown_width(fix_selendok_refresh(fix_avail_cpp(fix_lock_cpp(t)))))
+patch_file("shuicast/BasicSettings.h", lambda t: fix_high_header(fix_avail_header(fix_lock_header(t))))
+patch_file("shuicast/BasicSettings.cpp", lambda t: fix_high_cpp(fix_dropdown_width(fix_selendok_refresh(fix_avail_cpp(fix_lock_cpp(t))))))
 patch_file("shuicast/shuicast_standalone.cpp", fix_instance)
-patch_file("libshuicast/libshuicast.cpp", lambda t: fix_loaddll(fix_aacp(t)))
+patch_file("libshuicast/libshuicast.cpp", lambda t: fix_lc_label(fix_loaddll(fix_aacp(t))))
 patch_file("shuicast/shuicast.rc", fix_unsorted_rc)
 print(TAG + ": done")
