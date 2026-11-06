@@ -546,9 +546,67 @@ def fix_loaddll(t):
     )
 
 
+# ------------------------------------------- 6. encoder list: order, width, refresh
+MARK_UI = TAG + ": ui"
+
+
+def fix_unsorted_rc(t):
+    if "IDC_ENCODER_TYPE" not in t:
+        fail("rc: IDC_ENCODER_TYPE not found")
+    t2, n = re.subn(r"(COMBOBOX\s+IDC_ENCODER_TYPE,[^\n]*?)CBS_SORT \| ", r"\1", t)
+    if n > 1:
+        fail("rc: CBS_SORT matched %d times" % n)
+    return t2
+
+
+def fix_dropdown_width(t):
+    if MARK_UI in t:
+        return t
+    return sub_once(
+        t,
+        r"([ \t]*)return TRUE;([ \t]*)// return TRUE unless you set the focus to a control",
+        lambda m: (
+            m.group(1) + "{\t/* " + MARK_UI + ": widen the drop-down list so the (DLL...) mark is not cut off */\n"
+            + m.group(1) + "\tCDC *encDC = m_EncoderTypeCtrl.GetDC();\n"
+            + m.group(1) + "\tif (encDC != NULL) {\n"
+            + m.group(1) + "\t\tCFont *encOldFont = encDC->SelectObject(m_EncoderTypeCtrl.GetFont());\n"
+            + m.group(1) + "\t\tint encMaxW = 0;\n"
+            + m.group(1) + "\t\tint encI;\n"
+            + m.group(1) + "\t\tfor (encI = 0; encI < m_EncoderTypeCtrl.GetCount(); encI++) {\n"
+            + m.group(1) + "\t\t\tCString encItem;\n"
+            + m.group(1) + "\t\t\tm_EncoderTypeCtrl.GetLBText(encI, encItem);\n"
+            + m.group(1) + "\t\t\tint encW = encDC->GetTextExtent(encItem).cx;\n"
+            + m.group(1) + "\t\t\tif (encW > encMaxW) encMaxW = encW;\n"
+            + m.group(1) + "\t\t}\n"
+            + m.group(1) + "\t\tencDC->SelectObject(encOldFont);\n"
+            + m.group(1) + "\t\tm_EncoderTypeCtrl.ReleaseDC(encDC);\n"
+            + m.group(1) + "\t\tm_EncoderTypeCtrl.SetDroppedWidth(encMaxW + GetSystemMetrics(SM_CXVSCROLL) + 12);\n"
+            + m.group(1) + "\t}\n"
+            + m.group(1) + "}\n"
+        ) + m.group(0),
+        "BasicSettings.cpp OnInitDialog end",
+    )
+
+
+def fix_selendok_refresh(t):
+    mark = TAG + ": refresh"
+    if mark in t:
+        return t
+    return sub_once(
+        t,
+        r"(void CBasicSettings::OnSelendokEncoderType\s*\(\)\s*\{(?:(?!\nvoid CBasicSettings::).)*?)(\n[ \t]*)UpdateFields\(\);([ \t]*\n\s*\})",
+        lambda m: m.group(1) + m.group(2) + "UpdateFields();" + m.group(2)
+        + "UpdateData( FALSE );   " + C_OPEN + " " + mark + ": show the values UpdateFields() corrected (bitrate / channels) " + C_CLOSE
+        + m.group(3),
+        "BasicSettings.cpp OnSelendokEncoderType end",
+        flags=re.S,
+    )
+
+
 patch_file("shuicast/Config.cpp", lambda t: fix_avail_config(fix_lock_config(t)))
 patch_file("shuicast/BasicSettings.h", lambda t: fix_avail_header(fix_lock_header(t)))
-patch_file("shuicast/BasicSettings.cpp", lambda t: fix_avail_cpp(fix_lock_cpp(t)))
+patch_file("shuicast/BasicSettings.cpp", lambda t: fix_dropdown_width(fix_selendok_refresh(fix_avail_cpp(fix_lock_cpp(t)))))
 patch_file("shuicast/shuicast_standalone.cpp", fix_instance)
 patch_file("libshuicast/libshuicast.cpp", lambda t: fix_loaddll(fix_aacp(t)))
+patch_file("shuicast/shuicast.rc", fix_unsorted_rc)
 print(TAG + ": done")
