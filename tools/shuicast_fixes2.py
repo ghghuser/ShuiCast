@@ -674,10 +674,50 @@ def fix_para_label(t):
     return re.sub(r"(IDC_PARASTEREOLABEL,)260(,64,60,10)", r"\g<1>261\g<2>", t)
 
 
+# ------------------------------------------------ 9. connection time column
+MARK_TIME = TAG + ": time"
+
+
+def fix_time_header(t):
+    if MARK_TIME in t:
+        return t
+    return sub_once(
+        t,
+        r"([ \t]*)afx_msg void OnTimer\s*\(\s*UINT nIDEvent\s*\);\n",
+        lambda m: m.group(0) + m.group(1) + "void UpdateConnectionTimes();   // %s\n" % MARK_TIME,
+        "MainWindow.h OnTimer declaration",
+    )
+
+
+TIME_FUNC = '// %s: shows how long each encoder has been connected (hh:mm:ss) in the list\nvoid CMainWindow::UpdateConnectionTimes ()\n{\n    static ULONGLONG  connStart[MAX_ENCODERS];\n    static BOOL       wasConnected[MAX_ENCODERS];\n    int               numItems = m_Encoders.GetItemCount();\n    int               i;\n\n    for ( i = 0; i < numItems && i < MAX_ENCODERS; i++ )\n    {\n        BOOL     connected = %s;\n        CString  text;\n\n        if ( connected && !wasConnected[i] )\n        {\n            connStart[i] = GetTickCount64();\n        }\n        wasConnected[i] = connected;\n        if ( connected )\n        {\n            ULONGLONG sec = ( GetTickCount64() - connStart[i] ) / 1000;\n            text.Format( "%%02u:%%02u:%%02u", (unsigned int)( sec / 3600 ), (unsigned int)( ( sec / 60 ) %% 60 ), (unsigned int)( sec %% 60 ) );\n        }\n        if ( m_Encoders.GetItemText( i, %d ) != text )\n        {\n            m_Encoders.SetItemText( i, %d, text );\n        }\n    }\n}\n\n'
+TIME_EARLY = '    if ( nIDEvent == 74 )   // %s: connection time\n    {\n        UpdateConnectionTimes();\n        return;\n    }\n'
+TIME_COLS = 'm_Encoders.InsertColumn( 2, "Mount" );\n    m_Encoders.InsertColumn( 3, "Time" );   // %s: connection time\n    m_Encoders.SetColumnWidth( 0, 150 );\n    m_Encoders.SetColumnWidth( 1, 95 );\n    m_Encoders.SetColumnWidth( 2, 86 );\n    m_Encoders.SetColumnWidth( 3, 64 );\n    SetTimer( 74, 1000, 0 );   // once a second: update the connection time'
+
+
+def fix_time_cpp(t):
+    if MARK_TIME in t:
+        return t
+    t = sub_once(
+        t,
+        r"m_Encoders\.InsertColumn\( 2, \"Mount\" \);\s*m_Encoders\.SetColumnWidth\( 0, 190 \);\s*m_Encoders\.SetColumnWidth\( 1, 110 \);\s*m_Encoders\.SetColumnWidth\( 2, 96 \);",
+        lambda m: TIME_COLS % MARK_TIME,
+        "MainWindow.cpp list columns",
+    )
+    t = sub_once(
+        t,
+        r"void CMainWindow::OnTimer \( UINT nIDEvent \)\s*\{\n",
+        lambda m: (TIME_FUNC % (MARK_TIME, '(gEncoders[i] != NULL && gEncoders[i]->IsConnected())', 3, 3)) + 'void CMainWindow::OnTimer ( UINT nIDEvent )\n{\n' + (TIME_EARLY % MARK_TIME),
+        "MainWindow.cpp OnTimer",
+    )
+    return t
+
+
 patch_file("shuicast/Config.cpp", lambda t: fix_avail_config(fix_lock_config(t)))
 patch_file("shuicast/BasicSettings.h", lambda t: fix_high_header(fix_avail_header(fix_lock_header(t))))
 patch_file("shuicast/BasicSettings.cpp", lambda t: fix_high_cpp(fix_dropdown_width(fix_selendok_refresh(fix_avail_cpp(fix_lock_cpp(t))))))
 patch_file("shuicast/shuicast_standalone.cpp", fix_instance)
 patch_file("libshuicast/libshuicast.cpp", lambda t: fix_lc_label(fix_loaddll(fix_aacp(t))))
 patch_file("shuicast/shuicast.rc", lambda t: fix_para_label(fix_unsorted_rc(t)))
+patch_file("shuicast/MainWindow.h", fix_time_header)
+patch_file("shuicast/MainWindow.cpp", fix_time_cpp)
 print(TAG + ": done")
