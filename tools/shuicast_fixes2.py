@@ -718,13 +718,28 @@ LIST_VARS = ["ListColumnWidths", "ListColumnOrder", "ListChecked", "WindowSize"]
 LIST_MEMB = ['m_ListColumnWidths', 'm_ListColumnOrder', 'm_ListChecked', 'm_WindowSize']
 
 
+def _colw_members(m):
+    # the members are public (MainWindow uses them); the access of the code that follows is restored
+    labels = re.findall(r"^[ \t]*(public|private|protected):", m.string[: m.start()], re.M)
+    prev = labels[-1] if labels else "private"
+    ind = m.group(1)
+    return (
+        ind + "public:   // " + MARK_COLW + "\n"
+        + ind + 'char                  m_ListColumnWidths[64]    = "";\n'
+        + ind + 'char                  m_ListColumnOrder[64]     = "";\n'
+        + ind + 'char                  m_ListChecked[128]        = "";\n'
+        + ind + 'char                  m_WindowSize[32]          = "";\n'
+        + ind + prev + ":\n"
+    )
+
+
 def fix_colw_libheader(t):
     if MARK_COLW in t:
         return t
     return sub_once(
         t,
         r"([ \t]*)int[ \t]+m_SkipCloseWarning[ \t]*= 0;\n",
-        lambda m: m.group(0) + m.group(1) + 'char                  m_ListColumnWidths[64]    = "";   // shuicast_fixes2: colw\n' + m.group(1) + 'char                  m_ListColumnOrder[64]     = "";\n' + m.group(1) + 'char                  m_ListChecked[128]        = "";\n' + m.group(1) + 'char                  m_WindowSize[32]          = "";\n',
+        lambda m: m.group(0) + _colw_members(m),
         "libheader members",
     )
 
@@ -1695,13 +1710,27 @@ def fix_tls_config(t):
     return t
 
 
+def _tls_members(m):
+    # the members are public; the access of the code that follows is restored
+    labels = re.findall(r"^[ \t]*(public|private|protected):", m.string[: m.start()], re.M)
+    prev = labels[-1] if labels else "private"
+    ind = m.group(1)
+    return (
+        ind + "public:   // " + MARK_TLS + "\n"
+        + ind + "int                   m_UseTLS                  = 0;\n"
+        + ind + 'char                  m_TLSPinned[80]           = "";\n'
+        + ind + 'char                  m_TLSDeclined[80]         = "";\n'
+        + ind + prev + ":\n"
+    )
+
+
 def fix_tls_libheader(t):
     if MARK_TLS in t:
         return t
     return sub_once(
         t,
         r"([ \t]*)int[ \t]+m_SkipCloseWarning[ \t]*= 0;\n",
-        lambda m: m.group(0) + m.group(1) + "int                   m_UseTLS                  = 0;   // %s\n" % MARK_TLS + m.group(1) + 'char                  m_TLSPinned[80]           = "";\n' + m.group(1) + 'char                  m_TLSDeclined[80]         = "";\n',
+        lambda m: m.group(0) + _tls_members(m),
         "libheader TLS members",
     )
 
